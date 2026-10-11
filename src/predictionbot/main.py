@@ -64,10 +64,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--env", choices=["production", "demo", "mock"], default=None)
     ap.add_argument("--version", action="store_true")
+    ap.add_argument("--self-test", action="store_true", help="offline checks of order construction + firewall")
     args = ap.parse_args(argv)
     if args.version:
         print(build_info())
         return 0
+    if args.self_test:
+        import json
+
+        from predictionbot.selftest import run_self_test
+
+        report = run_self_test()
+        print(json.dumps(report, indent=2))
+        return 0 if report["passed"] else 1
     if args.env:
         os.environ["PCB_ENV"] = args.env
     if args.port:
