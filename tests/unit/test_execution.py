@@ -326,3 +326,22 @@ async def test_live_fill_dedup(db, rsa_pem: bytes) -> None:
     assert le.apply_fill(f) is True and le.apply_fill(f) is False
     assert led.open_positions()[0].count == D("1")
     _ = time
+
+
+async def test_live_fill_debits_cash_provisionally(db, rsa_pem: bytes) -> None:
+    le, led = _live(db, Exchange(), rsa_pem)
+    await le.submit(_intent("yes", "4", "0.50"))
+    assert led.cash == D("500") - D("4.00") * D("0.50") - D("0.0200")  # provisional until reconciliation
+    led.replace_from_exchange(
+        D("497.98"),
+        [
+            {
+                "ticker": "KXBTC15M-TEST-00",
+                "position_fp": "4.00",
+                "market_exposure_dollars": "2.00",
+                "fees_paid_dollars": "0.02",
+            }
+        ],
+        {},
+    )
+    assert led.cash == D("497.98") and led.open_positions()[0].count == D("4.00")

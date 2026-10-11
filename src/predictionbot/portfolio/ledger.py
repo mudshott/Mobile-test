@@ -163,8 +163,9 @@ class Ledger:
         pos.count += count
         pos.cost += count * price
         pos.fees += fee
-        if self.cash_source == "local":
-            self.cash -= count * price + fee
+        # Debit cash immediately in both modes. For LIVE this is provisional and
+        # conservative: the next exchange reconciliation overwrites cash.
+        self.cash -= count * price + fee
         self.last_update_ts = ts
         self._persist_position(pos)
         return pos

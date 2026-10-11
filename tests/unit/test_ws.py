@@ -157,3 +157,24 @@ async def test_connect_failure_backs_off_and_retries(rsa_pem: bytes) -> None:
     await _wait(lambda: ws.connected)
     assert attempts == 3
     await ws.stop()
+
+
+async def test_null_id_ack_does_not_crash(rsa_pem: bytes) -> None:
+    conn = FakeConn()
+
+    async def connect(url: str, headers: dict[str, str]) -> FakeConn:
+        return conn
+
+    got: list[dict[str, Any]] = []
+
+    async def h(m: dict[str, Any]) -> None:
+        got.append(m)
+
+    ws = KalshiWS("wss://x", KalshiSigner("kid", rsa_pem), h, connect_fn=connect)
+    ws.start()
+    await _wait(lambda: ws.connected)
+    conn.push({"id": None, "type": "subscribed", "msg": {"channel": "x", "sid": 3}})
+    conn.push({"id": None, "type": "error", "msg": {"code": 8, "msg": "Unknown channel name"}})
+    conn.push({"type": "ticker", "sid": 99, "msg": {}})
+    await _wait(lambda: len(got) == 3)
+    await ws.stop()

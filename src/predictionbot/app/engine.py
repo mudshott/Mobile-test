@@ -896,6 +896,15 @@ class Engine:
             f"{self.ws.stats.state}; reconnects={self.ws.stats.reconnects}",
             ws_age,
         )
+        skew = self.rest.stats.server_clock_skew_s
+        if skew is None:
+            put("CLOCK", "WARN", "skew unknown (no exchange Date header yet)")
+        else:
+            put(
+                "CLOCK",
+                "OK" if abs(skew) <= 2 else ("WARN" if abs(skew) <= 10 else "FAIL"),
+                f"local − exchange = {skew:+.2f}s (request signatures are timestamped)",
+            )
         db_ok, db_detail = self.db.healthy() if self.db._conn is not None else (False, "closed")
         put("DATABASE", "OK" if db_ok else "FAIL", db_detail)
         rc_age = now - self.recon["last_ok_ts"] if self.recon.get("last_ok_ts") else None
@@ -995,7 +1004,7 @@ class Engine:
     def _readiness(self, comps: dict[str, dict[str, Any]]) -> dict[str, Any]:
         core = ["CREDENTIALS", "REST", "WEBSOCKET", "DATABASE", "MARKET_DISCOVERY", "KILL_SWITCH"]
         paper_block = [f"{c}: {comps[c]['detail']}" for c in core if comps[c]["status"] == "FAIL"]
-        live_extra = ["AUTHENTICATION", "RECONCILIATION", "EXECUTION", "RISK"]
+        live_extra = ["AUTHENTICATION", "RECONCILIATION", "EXECUTION", "RISK", "CLOCK"]
         live_block = paper_block + [f"{c}: {comps[c]['detail']}" for c in live_extra if comps[c]["status"] == "FAIL"]
         if self.validation_summary.get("overall") != "PASS" and not self.settings.allow_live_without_validation:
             live_block.append(

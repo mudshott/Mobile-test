@@ -33,6 +33,11 @@ log = logging.getLogger(__name__)
 Handler = Callable[[dict[str, Any]], Awaitable[None]]
 
 
+def _msg_id(msg: dict[str, Any]) -> int:
+    mid = msg.get("id")
+    return mid if isinstance(mid, int) else -1
+
+
 def ws_body(msg: dict[str, Any]) -> dict[str, Any]:
     """The `msg` payload of a WebSocket frame, or {} if absent/malformed."""
     body = msg.get("msg")
@@ -256,7 +261,7 @@ class KalshiWS:
         body = ws_body(msg)
         if mtype == "subscribed":
             sid = body.get("sid")
-            sub = self._by_pending.pop(int(msg.get("id", -1)), None)
+            sub = self._by_pending.pop(_msg_id(msg), None)
             if sub is not None and isinstance(sid, int):
                 sub.sid = sid
                 sub.pending_id = None
@@ -268,7 +273,7 @@ class KalshiWS:
             return True
         if mtype == "error":
             self.stats.errors += 1
-            sub = self._by_pending.pop(int(msg.get("id", -1)), None)
+            sub = self._by_pending.pop(_msg_id(msg), None)
             key = sub.key if sub else "?"
             self._event("WS_ERROR", f"code={body.get('code')} {body.get('msg')} sub={key}")
             if sub is not None:
