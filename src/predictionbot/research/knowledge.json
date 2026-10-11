@@ -1,0 +1,110 @@
+[
+  {
+    "id": "H-SETTLE-001",
+    "topic": "Kalshi crypto settlement",
+    "source": "Kalshi Trade API AsyncAPI spec (cfbenchmarks_value channel), synced 2026-10-10",
+    "claim": "Crypto 15-minute contracts settle on the simple average of 60 one-second CF Benchmarks RTI values in (close-60s, close]; Kalshi streams the running final-minute average as last_60s_windowed_average_15min.",
+    "quality": "primary/official",
+    "credibility": "HIGH",
+    "hypothesis": "Modelling the distribution of the final-minute average (not the spot at close) reduces Brier score versus a spot-at-close model, especially inside the final 2 minutes.",
+    "methodology": "Run both model variants on OOS_TEST + LIVE_FORWARD markets; compare Brier with window-clustered bootstrap CI.",
+    "result": "",
+    "status": "UNTESTED"
+  },
+  {
+    "id": "H-SETTLE-002",
+    "topic": "Kalshi crypto settlement",
+    "source": "SETTLEMENT_RULE_AUDIT study (historical settled markets)",
+    "claim": "Our strike_type/floor_strike/expiration_value logic reproduces Kalshi's official result for every settled 15-minute crypto market.",
+    "quality": "primary/official data",
+    "credibility": "HIGH",
+    "hypothesis": "Agreement rate is 100%.",
+    "methodology": "Fetch settled markets per series and compare MarketInfo.yes_wins(expiration_value) with result.",
+    "result": "",
+    "status": "UNTESTED"
+  },
+  {
+    "id": "H-VOL-001",
+    "topic": "short-horizon crypto volatility",
+    "source": "Realized-volatility literature (e.g. Andersen, Bollerslev, Diebold & Labys 2003)",
+    "claim": "Short-horizon volatility is persistent and forecastable from recent realized volatility; EWMA of squared returns is a strong simple baseline.",
+    "quality": "peer-reviewed",
+    "credibility": "HIGH",
+    "hypothesis": "EWMA(half-life 5 min) of 1 s CF returns forecasts the next-15-minute realized variance better than a 30-minute flat window.",
+    "methodology": "Out-of-sample QLIKE loss of each estimator against realized variance of the following window, by asset.",
+    "result": "",
+    "status": "UNTESTED"
+  },
+  {
+    "id": "H-VOL-002",
+    "topic": "fat tails",
+    "source": "Stylized facts of asset returns (Cont 2001)",
+    "claim": "High-frequency crypto returns are heavy-tailed; Gaussian tails understate extreme moves.",
+    "quality": "peer-reviewed",
+    "credibility": "HIGH",
+    "hypothesis": "Including a Student-t(ν=4) component improves calibration of predictions in the ≥0.90 / ≤0.10 regions.",
+    "methodology": "Compare calibration buckets of Gaussian-only vs ensemble on held-out markets.",
+    "result": "",
+    "status": "UNTESTED"
+  },
+  {
+    "id": "H-MOM-001",
+    "topic": "short-horizon momentum",
+    "source": "Mixed evidence in intraday crypto return predictability studies",
+    "claim": "1–5 minute returns carry small autocorrelation in crypto spot.",
+    "quality": "mixed",
+    "credibility": "LOW",
+    "hypothesis": "Adding momentum_60s/momentum_300s as a drift term improves OOS log loss.",
+    "methodology": "Fit drift coefficient on TRAIN only; evaluate log-loss change on VALIDATION; promote only if CI excludes zero; confirm on OOS_TEST once.",
+    "result": "",
+    "status": "UNTESTED"
+  },
+  {
+    "id": "H-MICRO-001",
+    "topic": "prediction-market microstructure",
+    "source": "Favourite-longshot bias literature (e.g. Snowberg & Wolfers 2010) and studies of Kalshi pricing",
+    "claim": "Prediction markets tend to overprice longshots and underprice favourites.",
+    "quality": "peer-reviewed (sports/betting), limited for Kalshi crypto",
+    "credibility": "MEDIUM",
+    "hypothesis": "Kalshi 15m crypto contracts priced < $0.15 settle YES less often than their price implies.",
+    "methodology": "Market-implied calibration buckets (market_baseline in CALIBRATION study), clustered by window.",
+    "result": "",
+    "status": "UNTESTED"
+  },
+  {
+    "id": "H-MICRO-002",
+    "topic": "order book imbalance",
+    "source": "Limit-order-book literature (Cont, Kukanov & Stoikov 2014)",
+    "claim": "Order-flow imbalance predicts very-short-term price changes in continuous LOBs.",
+    "quality": "peer-reviewed",
+    "credibility": "MEDIUM",
+    "hypothesis": "Kalshi YES/NO top-of-book imbalance predicts the contract outcome beyond the CF-based model.",
+    "methodology": "Add imbalance to a logistic recalibration of the model on TRAIN; test on VALIDATION; must beat model-only log loss.",
+    "result": "",
+    "status": "UNTESTED"
+  },
+  {
+    "id": "H-EXEC-001",
+    "topic": "execution",
+    "source": "Internal paper-trading fills",
+    "claim": "Displayed Kalshi depth is not fully reachable by a taker arriving ~250 ms later.",
+    "quality": "internal",
+    "credibility": "MEDIUM",
+    "hypothesis": "Realized paper fill ratio at the limit price is ≤ 50% of displayed depth; the 50% haircut is not optimistic.",
+    "methodology": "Compare simulated fills with subsequent book deltas; if LIVE data exists compare with real fill ratios.",
+    "result": "",
+    "status": "UNTESTED"
+  },
+  {
+    "id": "H-RISK-001",
+    "topic": "risk management",
+    "source": "Kelly (1956); Thorp; MacLean, Thorp & Ziemba (2011)",
+    "claim": "Fractional Kelly sharply reduces drawdown variance for a modest growth cost, and protects against overestimated edges.",
+    "quality": "peer-reviewed",
+    "credibility": "HIGH",
+    "hypothesis": "Kelly fractions of 0.10/0.20/0.33 on the conservative probability keep 95th-percentile drawdown inside each profile's limit.",
+    "methodology": "Bootstrap paper P&L sequences by window; simulate drawdown distribution per profile.",
+    "result": "",
+    "status": "UNTESTED"
+  }
+]

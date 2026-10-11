@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PredictionCryptoBot</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">PredictionCryptoBot <span id="env" class="pill">…</span></div>
+  <div id="phase" class="pill">…</div>
+  <div id="botstate" class="pill big">STOPPED</div>
+  <button id="estop" class="danger hidden" title="Stops the bot immediately and engages the kill switch">EMERGENCY STOP</button>
+</header>
+
+<main class="grid">
+  <section class="card" id="control">
+    <h2>Bot control</h2>
+    <div class="row"><label>Mode</label>
+      <div class="seg" id="modeSeg">
+        <button data-mode="PAPER">PAPER</button><button data-mode="SHADOW">SHADOW</button><button data-mode="LIVE">LIVE</button>
+      </div></div>
+    <div class="row"><label>Risk profile</label>
+      <div class="seg" id="profSeg">
+        <button data-prof="SAFE_RETURNS">SAFE RETURNS</button><button data-prof="BALANCED">BALANCED</button><button data-prof="AGGRESSIVE_RESEARCHED">AGGRESSIVE RESEARCHED</button>
+      </div></div>
+    <div id="liveBox" class="livebox hidden">
+      <p><b>REAL MONEY.</b> LIVE submits real orders to Kalshi using your account. Losses are real and can be total for any position.
+      No profitability is claimed; check Strategy Validation. Positions are not liquidated by STOP.</p>
+      <input id="liveText" placeholder="type LIVE to confirm" autocomplete="off"> <button id="liveConfirm">Confirm</button>
+      <span id="liveConfirmed" class="muted"></span>
+    </div>
+    <div class="row buttons">
+      <button id="start" class="go">START BOT</button>
+      <button id="stop" class="stop">STOP BOT</button>
+      <button id="resetKill" class="hidden">Reset kill switch</button>
+    </div>
+    <div id="ctlMsg" class="msg"></div>
+    <div id="readiness" class="small"></div>
+  </section>
+
+  <section class="card" id="connection"><h2>Connection</h2><div id="connBody"></div></section>
+  <section class="card" id="healthCard"><h2>System health</h2><div id="healthBody"></div></section>
+  <section class="card" id="portfolio"><h2>Portfolio</h2><div id="portBody"></div></section>
+
+  <section class="card wide" id="watchCard"><h2>Market watch</h2><div id="watchBody" class="scroll"></div></section>
+  <section class="card wide" id="posCard"><h2>Positions</h2><div id="posBody"></div></section>
+  <section class="card wide" id="ordersCard"><h2>Orders (recent)</h2><div id="ordersBody" class="scroll"></div></section>
+  <section class="card" id="sessionCard"><h2>Session performance</h2><div id="sessionBody"></div></section>
+  <section class="card" id="validationCard"><h2>Strategy validation</h2><div id="valBody"></div>
+    <button id="runVal">Run validation studies now</button></section>
+  <section class="card wide" id="diagCard"><h2>Advanced / diagnostics</h2>
+    <details><summary>Recent events</summary><div id="events" class="scroll small"></div></details>
+    <details><summary>WebSocket events &amp; subscriptions</summary><div id="wsDiag" class="scroll small"></div></details>
+    <details><summary>Order books</summary><div id="booksDiag" class="scroll small"></div></details>
+    <details><summary>CF Benchmarks</summary><div id="cfDiag" class="scroll small"></div></details>
+    <details><summary>Risk profiles</summary><div id="profDiag" class="scroll small"></div></details>
+    <details><summary>Security / endpoint firewall</summary><div id="secDiag" class="scroll small"></div></details>
+  </section>
+  <section class="card" id="buildCard"><h2>Build info</h2><div id="buildBody" class="small"></div></section>
+</main>
+<footer class="small muted">Backend is authoritative · state refreshes every second · <span id="lastUpdate"></span></footer>
+<script src="/static/app.js"></script>
+</body>
+</html>
