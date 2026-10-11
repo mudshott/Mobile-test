@@ -322,7 +322,23 @@ production order was placed at any point.
     native-binary check).
 - Build provenance is exposed at `/api/build` and in the UI's *Build info* card (`source: packaged`).
 - `scripts/verify_packaged.py` launched the EXE and drove it through the checklist. Full results are in
-  **`docs/PACKAGED_VERIFICATION_WINDOWS.md`**: PACKAGED_RESULTS_PLACEHOLDER
+  **`docs/PACKAGED_VERIFICATION_WINDOWS.md`**: **29/29 checks passed** on the EXE built from
+  commit `a41f18c` (clean tree). Checks included:
+  - offline self-test of the V2 order body, with forbidden endpoints blocked and 0 HTTP requests;
+  - launch; build matches source; starts STOPPED;
+  - credentials, auth, reconciliation, REST, WS, discovery, books and CF all healthy, staying fresh;
+  - WS drop → reconnect + resubscribe; CF outage → stale → recovery;
+  - model READY; EV computed (healthy `NO_POSITIVE_ADJUSTED_EV` on fair quotes);
+  - PAPER start and loop; a deterministic mispricing produced an IOC paper fill (120 NO @ 0.3352),
+    which was persisted;
+  - two quarter-hour rollovers, with the position settled on the official result;
+  - STOP; header guard; LIVE blocked (mock + validation);
+  - restart returns STOPPED with history intact.
+- The final EXE was then rebuilt from the final source commit and re-verified (no settlement wait):
+  see `docs/PACKAGED_VERIFICATION_FINAL_BUILD.md`. That binary is committed as
+  `release/PredictionCryptoBot.exe` (SHA-256 in `release/SHA256SUMS.txt`), because `dist/` is a
+  disposable build output.
+- The dashboard was rendered from the packaged EXE in headless Chromium and checked visually.
 
 ## 16. Remaining genuine external limitations
 
