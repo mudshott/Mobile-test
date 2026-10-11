@@ -909,7 +909,17 @@ class Engine:
         put("DATABASE", "OK" if db_ok else "FAIL", db_detail)
         rc_age = now - self.recon["last_ok_ts"] if self.recon.get("last_ok_ts") else None
         rc_ok = bool(self.recon["ok"]) and rc_age is not None and rc_age < 2.5 * self.settings.portfolio_reconcile_s
-        put("RECONCILIATION", "OK" if rc_ok else "FAIL", self.recon.get("error") or "ok", rc_age)
+        if rc_ok:
+            rc_detail = "ok"
+        elif self.recon.get("error"):
+            rc_detail = str(self.recon["error"])
+        elif self.signer is None:
+            rc_detail = "never reconciled: no API credentials configured"
+        elif self.recon.get("last_ok_ts") is None:
+            rc_detail = "not yet reconciled with the exchange"
+        else:
+            rc_detail = f"last successful reconciliation is stale ({rc_age:.0f}s old)"
+        put("RECONCILIATION", "OK" if rc_ok else "FAIL", rc_detail, rc_age)
         active = self.registry.active_verified()
         disc_age = now - self.registry.last_discovery_ts if self.registry.last_discovery_ts else None
         if active:
@@ -991,7 +1001,14 @@ class Engine:
         put("RISK", "FAIL" if loss_hit else "OK", ", ".join(loss_hit) or f"governor active ({self.profile.value})")
         if self.mode == "LIVE":
             ex = "OK" if (self.signer and self.auth["ok"] and ops.unresolved_orders == 0) else "FAIL"
-            put("EXECUTION", ex, f"LIVE armed={self.live_exec.armed} unresolved={ops.unresolved_orders}")
+            why = []
+            if not self.signer:
+                why.append("no API credentials")
+            elif not self.auth["ok"]:
+                why.append("not authenticated with Kalshi")
+            if ops.unresolved_orders:
+                why.append(f"{ops.unresolved_orders} order(s) awaiting reconciliation")
+            put("EXECUTION", ex, "; ".join(why) if why else "LIVE executor ready (arms on START)")
         else:
             put("EXECUTION", "OK", f"{self.mode} executor ready")
         put(

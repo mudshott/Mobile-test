@@ -129,10 +129,22 @@ async def test_full_paper_lifecycle(mock_exchange, tmp_path: Path, key_file: Pat
         await _until(lambda: engine.health()["components"]["ORDER_BOOKS"]["status"] == "OK", 20)
         ex.faults["cf_pause_until"] = time.time() + 9
         await _until(lambda: engine.health()["components"]["CF_BENCHMARKS"]["status"] == "FAIL", 15)
+        stale_at = time.time()
+        # Judge evaluations made AFTER the feed went stale (an earlier tick may legitimately have had fresh data).
+        await _until(lambda: all(w["updated_ts"] > stale_at for w in engine.watch.values()), 5, 0.1)
         assert all(
             w["reason"].startswith(("CF_STALE", "TOO_", "INVALID")) or w["decision"] == "NO_TRADE"
             for w in engine.watch.values()
-        )
+        ), [
+            (
+                w["ticker"],
+                w["decision"],
+                w["reason"],
+                round(time.time() - w["updated_ts"], 2),
+                engine.cf.public().get(w["cf_index"], {}).get("age_s"),
+            )
+            for w in engine.watch.values()
+        ]
         await _until(lambda: engine.health()["components"]["CF_BENCHMARKS"]["status"] == "OK", 20)
 
         # ---- STOP: no new orders, positions kept
