@@ -146,7 +146,15 @@ class KalshiRest:
                 resp = await self._client.request(
                     method, self.base_url + path, params=clean_params, json=json_body, headers=headers
                 )
-            except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError, httpx.UnsupportedProtocol) as exc:
+                # Failed before the request could reach the exchange: never ambiguous.
+                self._record_error(f"{exc.__class__.__name__} on {method} {path}: {str(exc)[:120]}")
+                last_exc = TransientNetworkError(f"{exc.__class__.__name__}: {str(exc)[:200]}")
+                if is_write:
+                    raise last_exc from exc
+                await self._sleep(min(4.0, 0.5 * 2**attempt))
+                continue
+            except httpx.TransportError as exc:
                 self._record_error(f"{exc.__class__.__name__} on {method} {path}")
                 if is_write:
                     # The request may have reached the exchange. Do not retry blindly.

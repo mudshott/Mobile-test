@@ -885,7 +885,9 @@ class Engine:
         put(
             "REST",
             "OK" if r_age is not None and r_age < 90 else "FAIL",
-            f"last error: {self.rest.stats.last_error}" if self.rest.stats.last_error else "ok",
+            (f"last error: {self.rest.stats.last_error}" if self.rest.stats.last_error else "ok")
+            if r_age is not None
+            else f"no successful request yet: {self.rest.stats.last_error or 'connecting…'}",
             r_age,
         )
         ws_age = self.ws.message_age()

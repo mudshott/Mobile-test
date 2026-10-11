@@ -396,3 +396,23 @@ def test_verify_market_requires_cf_source() -> None:
     st.settlement_sources = ["CF Benchmarks https://cfbenchmarks.com"]
     assert verify_market(m, st, now) == []
     assert window_id(m.close_ts) == round(m.close_ts / 900)
+
+
+async def test_rest_proxy_and_connect_errors_are_handled(rsa_pem: bytes) -> None:
+    def h(req: httpx.Request) -> httpx.Response:
+        raise httpx.ProxyError("403 Forbidden", request=req)
+
+    async def nosleep(_: float) -> None:
+        return None
+
+    rest = KalshiRest(
+        "https://x.invalid/trade-api/v2", KalshiSigner("k", rsa_pem), transport=httpx.MockTransport(h), sleep=nosleep
+    )
+    from predictionbot.kalshi.rest import KalshiError, TransientNetworkError
+
+    with pytest.raises(KalshiError):
+        await rest.exchange_status()
+    assert rest.stats.last_error and "ProxyError" in rest.stats.last_error
+    # a write that never left the machine is a plain failure, not an ambiguous order
+    with pytest.raises(TransientNetworkError):
+        await rest.create_order_v2({"ticker": "X"})
