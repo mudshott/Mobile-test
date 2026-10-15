@@ -50,8 +50,22 @@ class TransientNetworkError(KalshiError):
     pass
 
 
+class KalshiConfigError(KalshiError):
+    """Deterministic configuration problem; retrying cannot help."""
+
+
 class AmbiguousWriteError(KalshiError):
     """A write was (possibly) sent but the outcome is unknown. Reconcile before acting."""
+
+
+# Failures that happen before any request bytes can reach the exchange.
+PRE_SEND_ERRORS: tuple[type[Exception], ...] = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ProxyError,
+    httpx.PoolTimeout,
+    httpx.LocalProtocolError,
+)
 
 
 class TokenBucket:
@@ -146,20 +160,20 @@ class KalshiRest:
                 resp = await self._client.request(
                     method, self.base_url + path, params=clean_params, json=json_body, headers=headers
                 )
-            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError, httpx.UnsupportedProtocol) as exc:
-                # Failed before the request could reach the exchange: never ambiguous.
+            except httpx.UnsupportedProtocol as exc:
+                # Deterministic misconfiguration (bad base URL): fail fast, never retry.
+                self._record_error(f"UnsupportedProtocol on {method} {path}")
+                raise KalshiConfigError(f"invalid API base URL {self.base_url!r}: {exc}") from exc
+            except httpx.RequestError as exc:
+                pre_send = isinstance(exc, PRE_SEND_ERRORS)
                 self._record_error(f"{exc.__class__.__name__} on {method} {path}: {str(exc)[:120]}")
-                last_exc = TransientNetworkError(f"{exc.__class__.__name__}: {str(exc)[:200]}")
                 if is_write:
-                    raise last_exc from exc
-                await self._sleep(min(4.0, 0.5 * 2**attempt))
-                continue
-            except httpx.TransportError as exc:
-                self._record_error(f"{exc.__class__.__name__} on {method} {path}")
-                if is_write:
+                    if pre_send:
+                        # Nothing reached the exchange: a plain failure, never ambiguous.
+                        raise TransientNetworkError(f"{exc.__class__.__name__}: {str(exc)[:200]}") from exc
                     # The request may have reached the exchange. Do not retry blindly.
                     raise AmbiguousWriteError(f"{method} {path}: {exc.__class__.__name__}") from exc
-                last_exc = TransientNetworkError(str(exc) or exc.__class__.__name__)
+                last_exc = TransientNetworkError(f"{exc.__class__.__name__}: {str(exc)[:200]}")
                 await self._sleep(min(4.0, 0.5 * 2**attempt))
                 continue
             self.stats.last_latency_ms = (time.monotonic() - t0) * 1000

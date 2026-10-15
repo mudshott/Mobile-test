@@ -345,3 +345,32 @@ async def test_live_fill_debits_cash_provisionally(db, rsa_pem: bytes) -> None:
         {},
     )
     assert led.cash == D("497.98") and led.open_positions()[0].count == D("4.00")
+
+
+async def test_live_not_sent_failure_is_not_counted_as_rejection(db, rsa_pem: bytes) -> None:
+    def h(req: httpx.Request) -> httpx.Response:
+        raise httpx.ProxyError("403", request=req)
+
+    rest = KalshiRest(
+        "https://mock.invalid/trade-api/v2", KalshiSigner("kid", rsa_pem), transport=httpx.MockTransport(h)
+    )
+    led = Ledger("LIVE", db, D("500"))
+    le = LiveExecutor(rest, led, db)
+    le.armed = True
+    for _ in range(6):
+        res = await le.submit(_intent())
+        assert res.status == "REJECTED" and res.error and res.error.startswith("not sent")
+    assert le.rejected == 0 and le.reject_ratio == 0.0  # network blips must not downgrade risk
+    assert le.unresolved_count() == 0 and led.reserved_total == ZERO
+
+
+async def test_live_unexpected_error_after_send_is_ambiguous(db, rsa_pem: bytes) -> None:
+    le, led = _live(db, Exchange(), rsa_pem)
+
+    async def boom(body):
+        raise RuntimeError("unexpected")
+
+    le.rest.create_order_v2 = boom  # type: ignore[method-assign]
+    res = await le.submit(_intent())
+    assert res.status == "AMBIGUOUS" and le.unresolved_count() == 1
+    assert led.reserved_total > 0  # capital stays reserved until reconciled

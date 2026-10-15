@@ -11,7 +11,14 @@ import pytest
 from predictionbot.buildinfo import MODEL_VERSION, SCHEMA_VERSION
 from predictionbot.config import SeriesSpec
 from predictionbot.kalshi.auth import KalshiSigner
-from predictionbot.kalshi.rest import AmbiguousWriteError, KalshiHTTPError, KalshiRest, RateLimitedError
+from predictionbot.kalshi.rest import (
+    AmbiguousWriteError,
+    KalshiConfigError,
+    KalshiHTTPError,
+    KalshiRest,
+    RateLimitedError,
+    TransientNetworkError,
+)
 from predictionbot.market.discovery import MarketRegistry, SeriesState, verify_market
 from predictionbot.persistence.db import Database, DatabaseError
 from predictionbot.portfolio.ledger import Ledger
@@ -398,9 +405,21 @@ def test_verify_market_requires_cf_source() -> None:
     assert window_id(m.close_ts) == round(m.close_ts / 900)
 
 
-async def test_rest_proxy_and_connect_errors_are_handled(rsa_pem: bytes) -> None:
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        lambda r: httpx.ProxyError("403 Forbidden", request=r),
+        lambda r: httpx.ConnectError("refused", request=r),
+        lambda r: httpx.PoolTimeout("pool", request=r),
+        lambda r: httpx.LocalProtocolError("bad", request=r),
+    ],
+)
+async def test_rest_pre_send_errors_are_not_ambiguous(rsa_pem: bytes, exc_factory) -> None:
+    calls = {"GET": 0, "POST": 0}
+
     def h(req: httpx.Request) -> httpx.Response:
-        raise httpx.ProxyError("403 Forbidden", request=req)
+        calls[req.method] += 1
+        raise exc_factory(req)
 
     async def nosleep(_: float) -> None:
         return None
@@ -408,11 +427,43 @@ async def test_rest_proxy_and_connect_errors_are_handled(rsa_pem: bytes) -> None
     rest = KalshiRest(
         "https://x.invalid/trade-api/v2", KalshiSigner("k", rsa_pem), transport=httpx.MockTransport(h), sleep=nosleep
     )
-    from predictionbot.kalshi.rest import KalshiError, TransientNetworkError
-
-    with pytest.raises(KalshiError):
-        await rest.exchange_status()
-    assert rest.stats.last_error and "ProxyError" in rest.stats.last_error
-    # a write that never left the machine is a plain failure, not an ambiguous order
     with pytest.raises(TransientNetworkError):
+        await rest.exchange_status()
+    assert calls["GET"] == 3 and rest.stats.last_error
+    with pytest.raises(TransientNetworkError):  # never left the machine: not ambiguous
         await rest.create_order_v2({"ticker": "X"})
+    assert calls["POST"] == 1  # writes are never retried
+
+
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        lambda r: httpx.ReadTimeout("lost", request=r),
+        lambda r: httpx.RemoteProtocolError("dropped", request=r),
+        lambda r: httpx.DecodingError("corrupt gzip", request=r),
+        lambda r: httpx.TooManyRedirects("loop", request=r),
+    ],
+)
+async def test_rest_post_send_errors_are_ambiguous(rsa_pem: bytes, exc_factory) -> None:
+    calls = {"POST": 0}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        calls["POST"] += 1
+        raise exc_factory(req)
+
+    rest = KalshiRest("https://x.invalid/trade-api/v2", KalshiSigner("k", rsa_pem), transport=httpx.MockTransport(h))
+    with pytest.raises(AmbiguousWriteError):
+        await rest.create_order_v2({"ticker": "X"})
+    assert calls["POST"] == 1
+
+
+async def test_rest_bad_base_url_fails_fast(rsa_pem: bytes) -> None:
+    slept: list[float] = []
+
+    async def sleep(s: float) -> None:
+        slept.append(s)
+
+    rest = KalshiRest("api.example.invalid/trade-api/v2", None, sleep=sleep)
+    with pytest.raises(KalshiConfigError):
+        await rest.exchange_status()
+    assert slept == []

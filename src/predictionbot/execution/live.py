@@ -34,7 +34,14 @@ from predictionbot.execution.base import (
 )
 from predictionbot.fixedpoint import ONE, ZERO, D, D_or_none, fmt_count, fmt_price
 from predictionbot.kalshi.firewall import FirewallViolation
-from predictionbot.kalshi.rest import AmbiguousWriteError, KalshiError, KalshiHTTPError, KalshiRest, RateLimitedError
+from predictionbot.kalshi.rest import (
+    AmbiguousWriteError,
+    KalshiError,
+    KalshiHTTPError,
+    KalshiRest,
+    RateLimitedError,
+    TransientNetworkError,
+)
 from predictionbot.market.models import parse_ts
 from predictionbot.persistence.db import Database
 from predictionbot.portfolio.ledger import Ledger, direction_of
@@ -198,12 +205,29 @@ class LiveExecutor:
             self.rejected += 1
             update_order(self.db, coid, status="REJECTED", error=str(exc)[:500])
             return OrderResult(coid, self.mode, "REJECTED", error=str(exc)[:200])
+        except TransientNetworkError as exc:
+            # Never left this machine (connect/proxy failure): not an exchange rejection.
+            self.ledger.release(coid)
+            update_order(self.db, coid, status="REJECTED", error=f"not sent: {str(exc)[:480]}")
+            return OrderResult(coid, self.mode, "REJECTED", error=f"not sent: {str(exc)[:180]}")
         except (FirewallViolation, KalshiError) as exc:
             self.ledger.release(coid)
             self.rejected += 1
             update_order(self.db, coid, status="REJECTED", error=str(exc)[:500])
             return OrderResult(coid, self.mode, "REJECTED", error=str(exc)[:200])
-        return await self._finalize(coid, intent, resp)
+        except Exception as exc:
+            # Unknown failure after the order may have been sent: fail safe → reconcile, never resubmit.
+            self.ambiguous[coid] = (intent.ticker, time.time(), intent)
+            update_order(self.db, coid, status="AMBIGUOUS", error=f"unexpected {exc.__class__.__name__}: {exc}"[:500])
+            log.exception("order %s: unexpected error; treated as AMBIGUOUS", coid)
+            return OrderResult(coid, self.mode, "AMBIGUOUS", error=exc.__class__.__name__)
+        try:
+            return await self._finalize(coid, intent, resp)
+        except Exception as exc:
+            # The exchange accepted the order; if recording it fails, reconcile rather than lose track of it.
+            self.ambiguous[coid] = (intent.ticker, time.time(), intent)
+            log.exception("order %s accepted but finalize failed; treated as AMBIGUOUS", coid)
+            return OrderResult(coid, self.mode, "AMBIGUOUS", error=f"finalize failed: {exc.__class__.__name__}")
 
     async def _finalize(self, coid: str, intent: OrderIntent, resp: dict[str, Any]) -> OrderResult:
         order_id = resp.get("order_id")

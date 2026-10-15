@@ -882,14 +882,17 @@ class Engine:
         a_age = now - self.auth["checked_ts"] if self.auth["checked_ts"] else None
         put("AUTHENTICATION", "OK" if self.auth["ok"] else "FAIL", str(self.auth["detail"]), a_age)
         r_age = now - self.rest.stats.last_ok_ts if self.rest.stats.last_ok_ts else None
-        put(
-            "REST",
-            "OK" if r_age is not None and r_age < 90 else "FAIL",
-            (f"last error: {self.rest.stats.last_error}" if self.rest.stats.last_error else "ok")
-            if r_age is not None
-            else f"no successful request yet: {self.rest.stats.last_error or 'connecting…'}",
-            r_age,
+        rs = self.rest.stats
+        error_is_current = rs.last_error is not None and (
+            rs.last_ok_ts is None or (rs.last_error_ts or 0) > rs.last_ok_ts
         )
+        if r_age is None:
+            rest_detail = f"no successful request yet: {rs.last_error or 'connecting…'}"
+        elif error_is_current:
+            rest_detail = f"latest request failed: {rs.last_error}"
+        else:
+            rest_detail = "ok"
+        put("REST", "OK" if r_age is not None and r_age < 90 else "FAIL", rest_detail, r_age)
         ws_age = self.ws.message_age()
         ws_ok = self.ws.connected and ws_age is not None and ws_age < self.settings.ws_stale_s
         put(
