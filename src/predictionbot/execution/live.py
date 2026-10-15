@@ -36,10 +36,12 @@ from predictionbot.fixedpoint import ONE, ZERO, D, D_or_none, fmt_count, fmt_pri
 from predictionbot.kalshi.firewall import FirewallViolation
 from predictionbot.kalshi.rest import (
     AmbiguousWriteError,
+    KalshiConfigError,
     KalshiError,
     KalshiHTTPError,
     KalshiRest,
     RateLimitedError,
+    RequestBuildError,
     TransientNetworkError,
 )
 from predictionbot.market.models import parse_ts
@@ -181,53 +183,55 @@ class LiveExecutor:
             intent.count, intent.limit_price, intent.market.fee_multiplier, intent.market.fee_type
         )
         self.ledger.reserve(coid, reserve)
-        self.submitted += 1
         try:
             resp = await self.rest.create_order_v2(body)
+        except (TransientNetworkError, KalshiConfigError, RequestBuildError, FirewallViolation) as exc:
+            # Never reached the exchange: a local failure, not an exchange rejection.
+            return self._mark_not_sent(coid, exc)
         except AmbiguousWriteError as exc:
-            self.ambiguous[coid] = (intent.ticker, time.time(), intent)
-            update_order(self.db, coid, status="AMBIGUOUS", error=str(exc))
-            log.error("order %s outcome ambiguous: %s — reconciling, NOT resubmitting", coid, exc)
-            return OrderResult(coid, self.mode, "AMBIGUOUS", error=str(exc))
-        except RateLimitedError as exc:
-            self.ledger.release(coid)
-            self.rejected += 1
-            update_order(self.db, coid, status="REJECTED", error=f"rate limited: {exc}")
-            return OrderResult(coid, self.mode, "REJECTED", error="rate limited")
+            self.submitted += 1
+            return self._mark_ambiguous(coid, intent, str(exc))
         except KalshiHTTPError as exc:
+            self.submitted += 1
             if exc.status == 409:
-                self.ambiguous[coid] = (intent.ticker, time.time(), intent)
-                update_order(
-                    self.db, coid, status="AMBIGUOUS", error=f"409 duplicate client_order_id: {exc.body[:200]}"
-                )
-                return OrderResult(coid, self.mode, "AMBIGUOUS", error="duplicate client_order_id")
-            self.ledger.release(coid)
-            self.rejected += 1
-            update_order(self.db, coid, status="REJECTED", error=str(exc)[:500])
-            return OrderResult(coid, self.mode, "REJECTED", error=str(exc)[:200])
-        except TransientNetworkError as exc:
-            # Never left this machine (connect/proxy failure): not an exchange rejection.
-            self.ledger.release(coid)
-            update_order(self.db, coid, status="REJECTED", error=f"not sent: {str(exc)[:480]}")
-            return OrderResult(coid, self.mode, "REJECTED", error=f"not sent: {str(exc)[:180]}")
-        except (FirewallViolation, KalshiError) as exc:
-            self.ledger.release(coid)
-            self.rejected += 1
-            update_order(self.db, coid, status="REJECTED", error=str(exc)[:500])
-            return OrderResult(coid, self.mode, "REJECTED", error=str(exc)[:200])
+                return self._mark_ambiguous(coid, intent, f"409 duplicate client_order_id: {exc.body[:200]}")
+            return self._mark_rejected(coid, f"rate limited: {exc}" if isinstance(exc, RateLimitedError) else str(exc))
+        except KalshiError as exc:
+            self.submitted += 1
+            return self._mark_rejected(coid, str(exc))
         except Exception as exc:
-            # Unknown failure after the order may have been sent: fail safe → reconcile, never resubmit.
-            self.ambiguous[coid] = (intent.ticker, time.time(), intent)
-            update_order(self.db, coid, status="AMBIGUOUS", error=f"unexpected {exc.__class__.__name__}: {exc}"[:500])
-            log.exception("order %s: unexpected error; treated as AMBIGUOUS", coid)
-            return OrderResult(coid, self.mode, "AMBIGUOUS", error=exc.__class__.__name__)
+            # Unknown failure while sending: the order may exist. Fail safe → reconcile, never resubmit.
+            self.submitted += 1
+            log.exception("order %s: unexpected error while sending; treated as AMBIGUOUS", coid)
+            return self._mark_ambiguous(coid, intent, f"unexpected {exc.__class__.__name__}: {exc}")
+        self.submitted += 1
         try:
             return await self._finalize(coid, intent, resp)
         except Exception as exc:
             # The exchange accepted the order; if recording it fails, reconcile rather than lose track of it.
-            self.ambiguous[coid] = (intent.ticker, time.time(), intent)
             log.exception("order %s accepted but finalize failed; treated as AMBIGUOUS", coid)
-            return OrderResult(coid, self.mode, "AMBIGUOUS", error=f"finalize failed: {exc.__class__.__name__}")
+            return self._mark_ambiguous(coid, intent, f"accepted; finalize failed: {exc.__class__.__name__}: {exc}")
+
+    def _mark_ambiguous(self, coid: str, intent: OrderIntent, error: str) -> OrderResult:
+        """Outcome unknown: keep capital reserved, block new risk, reconcile by client_order_id."""
+        self.ambiguous[coid] = (intent.ticker, time.time(), intent)
+        try:
+            update_order(self.db, coid, status="AMBIGUOUS", error=error[:500])
+        except Exception:
+            log.exception("could not persist AMBIGUOUS state for %s", coid)
+        log.error("order %s outcome ambiguous: %s — reconciling, NOT resubmitting", coid, error)
+        return OrderResult(coid, self.mode, "AMBIGUOUS", error=error[:200])
+
+    def _mark_rejected(self, coid: str, error: str) -> OrderResult:
+        self.ledger.release(coid)
+        self.rejected += 1
+        update_order(self.db, coid, status="REJECTED", error=error[:500])
+        return OrderResult(coid, self.mode, "REJECTED", error=error[:200])
+
+    def _mark_not_sent(self, coid: str, exc: Exception) -> OrderResult:
+        self.ledger.release(coid)
+        update_order(self.db, coid, status="REJECTED", error=f"not sent: {str(exc)[:480]}")
+        return OrderResult(coid, self.mode, "REJECTED", error=f"not sent: {str(exc)[:180]}")
 
     async def _finalize(self, coid: str, intent: OrderIntent, resp: dict[str, Any]) -> OrderResult:
         order_id = resp.get("order_id")
@@ -263,7 +267,6 @@ class LiveExecutor:
         """Idempotently record an exchange fill. Returns True if new."""
         if nf.fill_id in self.known_fill_ids:
             return False
-        self.known_fill_ids.add(nf.fill_id)
         if self.db is not None:
             try:
                 self.db.insert(
@@ -296,6 +299,8 @@ class LiveExecutor:
                 fee=nf.fee,
                 ts=nf.ts,
             )
+        # Only now is the fill fully recorded; if anything above raised, a retry will re-apply it.
+        self.known_fill_ids.add(nf.fill_id)
         return True
 
     def recover_unresolved_from_db(self) -> int:

@@ -374,3 +374,57 @@ async def test_live_unexpected_error_after_send_is_ambiguous(db, rsa_pem: bytes)
     res = await le.submit(_intent())
     assert res.status == "AMBIGUOUS" and le.unresolved_count() == 1
     assert led.reserved_total > 0  # capital stays reserved until reconciled
+
+
+async def test_live_fill_reapplied_after_ledger_failure(db, rsa_pem: bytes) -> None:
+    le, led = _live(db, Exchange(), rsa_pem)
+    nf = normalize_fill(
+        {
+            "fill_id": "F1",
+            "ticker": "X",
+            "outcome_side": "yes",
+            "book_side": "bid",
+            "count_fp": "2",
+            "yes_price_dollars": "0.40",
+            "fee_cost": "0.01",
+        }
+    )
+    assert nf is not None
+    real = led.apply_fill
+
+    def fail(**kw):
+        raise RuntimeError("ledger down")
+
+    led.apply_fill = fail  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        le.apply_fill(nf)
+    led.apply_fill = real  # type: ignore[method-assign]
+    assert le.apply_fill(nf) is True  # not skipped as "already known"
+    assert led.open_positions()[0].count == D("2")
+
+
+async def test_live_finalize_failure_persists_ambiguous(db, rsa_pem: bytes) -> None:
+    le, _led = _live(db, Exchange(), rsa_pem)
+
+    async def boom(*a, **k):
+        raise RuntimeError("db hiccup")
+
+    le._finalize = boom  # type: ignore[method-assign]
+    res = await le.submit(_intent())
+    assert res.status == "AMBIGUOUS" and le.unresolved_count() == 1
+    assert db.one("SELECT status FROM orders")["status"] == "AMBIGUOUS"  # survives a restart
+    assert le.submitted == 1
+
+
+async def test_live_not_sent_does_not_dilute_reject_ratio(db, rsa_pem: bytes) -> None:
+    def h(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("down", request=req)
+
+    rest = KalshiRest(
+        "https://mock.invalid/trade-api/v2", KalshiSigner("kid", rsa_pem), transport=httpx.MockTransport(h)
+    )
+    le = LiveExecutor(rest, Ledger("LIVE", db, D("500")), db)
+    le.armed = True
+    for _ in range(10):
+        await le.submit(_intent())
+    assert le.submitted == 0 and le.rejected == 0

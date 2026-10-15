@@ -411,7 +411,6 @@ def test_verify_market_requires_cf_source() -> None:
         lambda r: httpx.ProxyError("403 Forbidden", request=r),
         lambda r: httpx.ConnectError("refused", request=r),
         lambda r: httpx.PoolTimeout("pool", request=r),
-        lambda r: httpx.LocalProtocolError("bad", request=r),
     ],
 )
 async def test_rest_pre_send_errors_are_not_ambiguous(rsa_pem: bytes, exc_factory) -> None:
@@ -442,6 +441,7 @@ async def test_rest_pre_send_errors_are_not_ambiguous(rsa_pem: bytes, exc_factor
         lambda r: httpx.RemoteProtocolError("dropped", request=r),
         lambda r: httpx.DecodingError("corrupt gzip", request=r),
         lambda r: httpx.TooManyRedirects("loop", request=r),
+        lambda r: httpx.LocalProtocolError("h2 state error", request=r),  # may occur after send on HTTP/2
     ],
 )
 async def test_rest_post_send_errors_are_ambiguous(rsa_pem: bytes, exc_factory) -> None:
@@ -467,3 +467,86 @@ async def test_rest_bad_base_url_fails_fast(rsa_pem: bytes) -> None:
     with pytest.raises(KalshiConfigError):
         await rest.exchange_status()
     assert slept == []
+
+
+async def test_rest_signing_failure_is_not_sent(rsa_pem: bytes) -> None:
+    calls: list[str] = []
+
+    def h(req: httpx.Request) -> httpx.Response:
+        calls.append(req.method)
+        return httpx.Response(200, json={})
+
+    signer = KalshiSigner("k", rsa_pem)
+
+    def broken(*a, **k):
+        raise ValueError("bad key")
+
+    signer.headers = broken  # type: ignore[method-assign]
+    rest = KalshiRest("https://x.invalid/trade-api/v2", signer, transport=httpx.MockTransport(h))
+    from predictionbot.kalshi.rest import RequestBuildError
+
+    with pytest.raises(RequestBuildError):
+        await rest.create_order_v2({"ticker": "X"})
+    assert calls == []
+
+
+async def test_rest_non_object_payload_is_an_error(rsa_pem: bytes) -> None:
+    def h(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=["not", "an", "object"])
+
+    rest = KalshiRest("https://x.invalid/trade-api/v2", None, transport=httpx.MockTransport(h))
+    with pytest.raises(Exception, match="unexpected payload"):
+        await rest.exchange_status()
+    assert rest.stats.last_ok_ts is None and rest.stats.last_error
+
+
+def test_mock_env_requires_url_schemes(tmp_path) -> None:
+    from predictionbot.config import ConfigError, load_settings
+
+    with pytest.raises(ConfigError):
+        load_settings(tmp_path, {"PCB_ENV": "mock", "PCB_MOCK_REST": "127.0.0.1:8799/trade-api/v2"})
+
+
+def test_live_exchange_settlement_after_position_vanished(db: Database) -> None:
+    led = Ledger("LIVE", db, D("100"))
+    led.cash_source = "exchange"
+    led.apply_fill(
+        ticker="KXBTC15M-Z", outcome="no", asset="BTC", direction="DOWN", count=D("5"), price=D("0.40"), fee=D("0.09")
+    )
+    # Reconciliation runs first: Kalshi already settled, the position is gone.
+    led.replace_from_exchange(D("103"), [], {})
+    assert led.open_positions() == []
+    assert led.settle_market("KXBTC15M-Z", "no", source="poll") == []  # local path can no longer settle it
+    s = {
+        "ticker": "KXBTC15M-Z",
+        "market_result": "no",
+        "yes_count_fp": "0.00",
+        "yes_total_cost_dollars": "0",
+        "no_count_fp": "5.00",
+        "no_total_cost_dollars": "2.000000",
+        "revenue": 500,
+        "fee_cost": "0.090000",
+        "settled_time": "2026-10-15T12:00:00Z",
+        "event_ticker": "E",
+        "exchange_index": 0,
+    }
+    [rec] = led.record_exchange_settlement(s)
+    assert rec.payout == D("5") and rec.pnl == D("5") - D("2") - D("0.09")
+    assert led.record_exchange_settlement(s) == []  # idempotent
+    row = db.one("SELECT * FROM settlements WHERE mode='LIVE'")
+    assert row["source"] == "KALSHI_PORTFOLIO_SETTLEMENT" and D(row["pnl"]) == D("2.91")
+
+
+def test_live_daily_loss_limit_armed_and_survives_restart(db: Database) -> None:
+    led = Ledger("LIVE", db, D("0"))
+    led.cash_source = "exchange"
+    assert led.daily_loss_pct == 0
+    led.replace_from_exchange(D("1000"), [], {})  # first reconciliation establishes the baseline
+    assert led.day_start_equity == D("1000")
+    led.replace_from_exchange(D("880"), [], {})
+    assert led.daily_loss_pct == D("0.12")
+    # restart mid-day: a fresh ledger must keep the same baseline, not reset to 880
+    led2 = Ledger("LIVE", db, D("0"))
+    led2.cash_source = "exchange"
+    led2.replace_from_exchange(D("880"), [], {})
+    assert led2.day_start_equity == D("1000") and led2.daily_loss_pct == D("0.12")

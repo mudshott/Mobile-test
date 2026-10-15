@@ -248,7 +248,6 @@ class Engine:
         )
         self.paper_ledger.cash = start - spent + payouts
         self.paper_ledger.start_session()
-        self.paper_ledger.day_start_equity = self.paper_ledger.equity
 
     # ============================================================ WS handling
     async def _setup_private_subscriptions(self) -> None:
@@ -306,7 +305,10 @@ class Engine:
             coid = body.get("client_order_id")
             if coid and str(coid).startswith("pcb-l-"):
                 status = str(body.get("status", ""))
+                filled = D_or_none(body.get("fill_count_fp")) or ZERO
                 mapped = {"resting": "RESTING", "canceled": "CANCELED", "executed": "FILLED"}.get(status)
+                if mapped == "CANCELED" and filled > 0:
+                    mapped = "PARTIALLY_FILLED"  # IOC remainder cancelled after a partial fill
                 if mapped:
                     self.db.execute(
                         "UPDATE orders SET status=?, exchange_order_id=COALESCE(exchange_order_id, ?), "
@@ -763,6 +765,7 @@ class Engine:
             positions = await self.rest.get_positions(self.settings.subaccount)
             resting = await self.rest.get_orders(self.settings.subaccount, status="resting")
             fills = await self.rest.get_fills(self.settings.subaccount, min_ts=int(self._fill_watermark_ts))
+            settlements = await self.rest.get_settlements(self.settings.subaccount, min_ts=int(time.time() - 6 * 3600))
         except KalshiError as exc:
             self.recon.update({"ok": False, "error": str(exc)[:300]})
             self.event("RECONCILE", "RECONCILE_FAILED", str(exc)[:200])
@@ -775,6 +778,9 @@ class Engine:
             if nf is not None and self.live_exec.apply_fill(nf):
                 new_fills += 1
         self._fill_watermark_ts = time.time() - 300
+        for s in settlements:
+            for rec in self.live_ledger.record_exchange_settlement(s):
+                self.event("SETTLEMENT", "LIVE_SETTLED", f"{rec.ticker} {rec.outcome} x{rec.count} pnl={rec.pnl}")
         if cash is not None:
             self.live_ledger.replace_from_exchange(cash, positions, meta)
         self.db.insert(
@@ -881,15 +887,13 @@ class Engine:
         )
         a_age = now - self.auth["checked_ts"] if self.auth["checked_ts"] else None
         put("AUTHENTICATION", "OK" if self.auth["ok"] else "FAIL", str(self.auth["detail"]), a_age)
-        r_age = now - self.rest.stats.last_ok_ts if self.rest.stats.last_ok_ts else None
         rs = self.rest.stats
-        error_is_current = rs.last_error is not None and (
-            rs.last_ok_ts is None or (rs.last_error_ts or 0) > rs.last_ok_ts
-        )
+        r_age = now - rs.last_ok_ts if rs.last_ok_ts else None
+        err_age = now - rs.last_error_ts if rs.last_error_ts else None
         if r_age is None:
             rest_detail = f"no successful request yet: {rs.last_error or 'connecting…'}"
-        elif error_is_current:
-            rest_detail = f"latest request failed: {rs.last_error}"
+        elif err_age is not None and err_age < 120:
+            rest_detail = f"recent error ({err_age:.0f}s ago): {rs.last_error}"
         else:
             rest_detail = "ok"
         put("REST", "OK" if r_age is not None and r_age < 90 else "FAIL", rest_detail, r_age)

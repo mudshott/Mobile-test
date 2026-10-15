@@ -54,6 +54,10 @@ class KalshiConfigError(KalshiError):
     """Deterministic configuration problem; retrying cannot help."""
 
 
+class RequestBuildError(KalshiError):
+    """The request could not be built/signed locally; nothing was sent."""
+
+
 class AmbiguousWriteError(KalshiError):
     """A write was (possibly) sent but the outcome is unknown. Reconcile before acting."""
 
@@ -64,7 +68,6 @@ PRE_SEND_ERRORS: tuple[type[Exception], ...] = (
     httpx.ConnectTimeout,
     httpx.ProxyError,
     httpx.PoolTimeout,
-    httpx.LocalProtocolError,
 )
 
 
@@ -148,32 +151,37 @@ class KalshiRest:
         last_exc: Exception | None = None
         for attempt in range(attempts):
             await (self._write_bucket if is_write else self._read_bucket).acquire()
-            full_path = self.path_prefix + path
-            headers = {"Accept": "application/json"}
-            if auth and self.signer is not None:
-                headers.update(self.signer.headers(method, full_path))
-            if json_body is not None:
-                headers["Content-Type"] = "application/json"
+            # ---- build (signing, URL, JSON encoding): nothing can have been sent if this fails
+            try:
+                headers = {"Accept": "application/json"}
+                if auth and self.signer is not None:
+                    headers.update(self.signer.headers(method, self.path_prefix + path))
+                req = self._client.build_request(
+                    method, self.base_url + path, params=clean_params, json=json_body, headers=headers
+                )
+            except (httpx.UnsupportedProtocol, httpx.InvalidURL) as exc:
+                self._record_error(f"{exc.__class__.__name__} building {method} {path}")
+                raise KalshiConfigError(f"invalid request URL for {path!r}: {exc}") from exc
+            except Exception as exc:
+                self._record_error(f"{exc.__class__.__name__} building {method} {path}: {str(exc)[:120]}")
+                raise RequestBuildError(f"{method} {path} not sent: {exc.__class__.__name__}: {exc}") from exc
+            # ---- send
             t0 = time.monotonic()
             self.stats.requests += 1
             try:
-                resp = await self._client.request(
-                    method, self.base_url + path, params=clean_params, json=json_body, headers=headers
-                )
+                resp = await self._client.send(req)
             except httpx.UnsupportedProtocol as exc:
-                # Deterministic misconfiguration (bad base URL): fail fast, never retry.
                 self._record_error(f"UnsupportedProtocol on {method} {path}")
                 raise KalshiConfigError(f"invalid API base URL {self.base_url!r}: {exc}") from exc
             except httpx.RequestError as exc:
-                pre_send = isinstance(exc, PRE_SEND_ERRORS)
                 self._record_error(f"{exc.__class__.__name__} on {method} {path}: {str(exc)[:120]}")
+                not_sent = TransientNetworkError(f"{exc.__class__.__name__}: {str(exc)[:200]}")
                 if is_write:
-                    if pre_send:
-                        # Nothing reached the exchange: a plain failure, never ambiguous.
-                        raise TransientNetworkError(f"{exc.__class__.__name__}: {str(exc)[:200]}") from exc
+                    if isinstance(exc, PRE_SEND_ERRORS):
+                        raise not_sent from exc  # nothing reached the exchange: never ambiguous
                     # The request may have reached the exchange. Do not retry blindly.
                     raise AmbiguousWriteError(f"{method} {path}: {exc.__class__.__name__}") from exc
-                last_exc = TransientNetworkError(f"{exc.__class__.__name__}: {str(exc)[:200]}")
+                last_exc = not_sent
                 await self._sleep(min(4.0, 0.5 * 2**attempt))
                 continue
             self.stats.last_latency_ms = (time.monotonic() - t0) * 1000
@@ -198,8 +206,8 @@ class KalshiRest:
             if resp.status_code >= 400:
                 self._record_error(f"{resp.status_code} on {method} {path}")
                 raise KalshiHTTPError(resp.status_code, method, path, resp.text)
-            self.stats.last_ok_ts = time.time()
             if not resp.content:
+                self.stats.last_ok_ts = time.time()
                 return {}
             try:
                 data = resp.json()
@@ -210,7 +218,11 @@ class KalshiRest:
                 last_exc = KalshiError(f"malformed JSON from {path}")
                 continue
             if not isinstance(data, dict):
+                self._record_error(f"unexpected payload type on {method} {path}")
+                if is_write:
+                    raise AmbiguousWriteError(f"{method} {path}: unexpected payload type")
                 raise KalshiError(f"unexpected payload type from {path}")
+            self.stats.last_ok_ts = time.time()
             return data
         assert last_exc is not None
         raise last_exc

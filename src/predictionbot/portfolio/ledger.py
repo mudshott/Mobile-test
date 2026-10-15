@@ -116,11 +116,26 @@ class Ledger:
 
     def _roll_day(self) -> None:
         key = time.strftime("%Y-%m-%d", time.gmtime())
-        if key != self.day_key:
+        if key != self.day_key or self.day_start_equity <= 0:
             self.day_key = key
-            self.day_start_equity = self.equity
+            self.ensure_day_baseline()
+
+    def ensure_day_baseline(self) -> None:
+        """Day-start equity, persisted per mode and UTC date so a restart cannot reset the daily loss limit."""
+        key = f"day_start_equity:{self.mode}:{self.day_key}"
+        if self.db is not None:
+            row = self.db.one("SELECT value FROM meta WHERE key=?", (key,))
+            if row is not None:
+                self.day_start_equity = D(row["value"])
+                return
+        if self.equity <= 0:
+            return  # no reconciled bankroll yet; set the baseline once one exists
+        self.day_start_equity = self.equity
+        if self.db is not None:
+            self.db.execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", (key, str(self.equity)))
 
     def start_session(self) -> None:
+        self._roll_day()
         self.session_start_equity = self.equity
         self.peak_equity = self.equity
         self.realized_pnl_session = ZERO
@@ -209,6 +224,75 @@ class Ledger:
         self.mark()
         return out
 
+    def record_exchange_settlement(self, s: dict[str, Any]) -> list[SettlementRecord]:
+        """LIVE: record Kalshi's authoritative settlement (GET /portfolio/settlements).
+
+        Idempotent per (mode, ticker, outcome). Works even if reconciliation already
+        removed the position because the exchange settled it first.
+        """
+        from predictionbot.market.models import parse_ts
+
+        ticker = str(s.get("ticker", ""))
+        result = str(s.get("market_result", ""))
+        if not ticker or result not in ("yes", "no"):
+            return []
+        try:
+            sides = {
+                "yes": (D(s.get("yes_count_fp", "0")), D(s.get("yes_total_cost_dollars", "0"))),
+                "no": (D(s.get("no_count_fp", "0")), D(s.get("no_total_cost_dollars", "0"))),
+            }
+            fee_total = D(s.get("fee_cost", "0"))
+        except ValueError:
+            return []
+        total_count = sum((c for c, _ in sides.values()), ZERO)
+        ts = parse_ts(s.get("settled_time")) or time.time()
+        out: list[SettlementRecord] = []
+        for outcome, (count, cost) in sides.items():
+            if count <= 0:
+                continue
+            fees = (fee_total * count / total_count).quantize(D("0.000001")) if total_count > 0 else ZERO
+            payout = count if outcome == result else ZERO
+            pnl = payout - cost - fees
+            new = True
+            if self.db is not None:
+                new = (
+                    self.db.one(
+                        "SELECT 1 AS x FROM settlements WHERE mode=? AND ticker=? AND outcome=?",
+                        (self.mode, ticker, outcome),
+                    )
+                    is None
+                )
+                self.db.upsert(
+                    "settlements",
+                    {
+                        "mode": self.mode,
+                        "ticker": ticker,
+                        "outcome": outcome,
+                        "result": result,
+                        "settled_ts": ts,
+                        "count": str(count),
+                        "cost": str(cost),
+                        "fees": str(fees),
+                        "payout": str(payout),
+                        "pnl": str(pnl),
+                        "source": "KALSHI_PORTFOLIO_SETTLEMENT",
+                    },
+                    keys=("mode", "ticker", "outcome"),
+                )
+            pos = self.positions.get((ticker, outcome))
+            if pos is not None and pos.status != "SETTLED":
+                pos.status = "SETTLED"
+                self._persist_position(pos, result=result, payout=payout, pnl=pnl, settled_ts=ts)
+            if new:
+                self.realized_pnl_session += pnl
+                self.consecutive_losses = self.consecutive_losses + 1 if pnl < 0 else 0
+                out.append(
+                    SettlementRecord(
+                        ticker, outcome, result, count, cost, fees, payout, pnl, ts, "KALSHI_PORTFOLIO_SETTLEMENT"
+                    )
+                )
+        return out
+
     def mark(self) -> None:
         eq = self.equity
         if eq > self.peak_equity:
@@ -257,6 +341,7 @@ class Ledger:
                 # Closed/settled on the exchange; settlement processing records the outcome.
                 pos.status = "CLOSED_ON_EXCHANGE"
                 self._persist_position(pos)
+        self._roll_day()
         self.mark()
 
     def _persist_position(

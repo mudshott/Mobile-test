@@ -130,6 +130,8 @@ def _validate_endpoints(s: Settings) -> None:
         if s.rest_base != DEMO_REST or s.ws_url != DEMO_WS:
             raise ConfigError("demo environment must use the official demo hosts")
     elif s.environment == "mock":
+        if not s.rest_base.startswith(("http://", "https://")) or not s.ws_url.startswith(("ws://", "wss://")):
+            raise ConfigError("mock endpoints need http(s):// and ws(s):// schemes")
         for url in (s.rest_base, s.ws_url):
             host = url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
             if host not in ("127.0.0.1", "localhost"):
