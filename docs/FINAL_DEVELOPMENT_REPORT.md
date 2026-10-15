@@ -305,7 +305,7 @@ tuned on OOS_TEST or LIVE_FORWARD.
 | test_ws | 5 | subscribe/ack, duplicate, gap, malformed, reconnect + resubscribe, no false gap after reconnect, slow handler isolation, backoff, null-id frames |
 | integration/test_end_to_end | 2 | real Engine + API vs the in-process mock: startup STOPPED → READY, PAPER fill, WS drop, seq gap, CF outage, STOP, restart STOPPED, API guards, LIVE gating |
 
-Commands and results on the final tree: `pytest` → **153 passed**; `ruff check` and
+Commands and results on the final tree: `pytest` → **172 passed**; `ruff check` and
 `ruff format --check` → clean; `mypy` → **no issues in 50 files**; `scripts/secret_scan.py` → 0
 problems; schema check: migration applied from empty, version guard and backup tested. No real
 production order was placed at any point.

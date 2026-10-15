@@ -1,1 +1,1 @@
-7302428c74ac4cf6986ee23f34d498dc3367c5c524bf36103943379acbc0cb0b  PredictionCryptoBot.exe
+6248f592962babb6c04035a5141bb348ffd4be9733c8dca2969ee8d3b09ebdc3  PredictionCryptoBot.exe
